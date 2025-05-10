@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RawMusicEvent",
+  "type": "object",
+  "properties": {
+    "id":       { "type": "string" },
+    "title":    { "type": "string" },
+    "text":     { "type": "string" },
+    "length":   { "type": "number" },
+    "authors":  { "type": "array", "items": { "type": "string" } },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "platform": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["platform", "timestamp"]
+    }
+  },
+  "required": ["id", "title", "text", "authors", "metadata"]
+}
