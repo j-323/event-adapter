@@ -1,9 +1,11 @@
+# src/music_adapter/main.py
 #!/usr/bin/env python3
 import asyncio
 import signal
 import json
 import logging
 from aio_pika.abc import AbstractIncomingMessage
+from prometheus_client import Counter, Histogram
 
 from music_adapter.config.settings import get_settings
 from music_adapter.broker.broker import Broker
@@ -18,21 +20,25 @@ settings = get_settings()
 logger = init_logger("music_adapter")
 tracer = init_tracer("music_adapter")
 
+# Метрики обработки сообщений
+MSG_COUNT = Counter(
+    "adapter_messages_total", "Всего сообщений обработано", ["status"]
+)
+MSG_LATENCY = Histogram(
+    "adapter_message_processing_seconds", "Время обработки одного сообщения"
+)
+
 class MusicAdapter:
     def __init__(self):
         self.broker = Broker()
         self.shutdown_event = asyncio.Event()
 
     async def start(self):
-        # Запуск health-endpoint
         run_health_server()
-
-        # Подключение к брокеру и подписка
         await self.broker.connect()
         await self.broker.subscribe(settings.IN_TOPIC, self._on_message)
         logger.info(f"Subscribed to {settings.IN_TOPIC}")
 
-        # Обработка сигналов
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self.shutdown_event.set)
@@ -42,13 +48,15 @@ class MusicAdapter:
         await self.shutdown()
 
     async def _on_message(self, msg: AbstractIncomingMessage):
-        with tracer.start_as_current_span("handle_message") as span:
+        start_time = asyncio.get_event_loop().time()
+        with tracer.start_as_current_span("handle_message"):
             try:
                 raw = json.loads(msg.body)
                 validate_event(raw)
-                span.set_attribute("event.id", raw["id"])
 
-                raw.setdefault("meta", {})["received_at"] = asyncio.get_event_loop().time()
+                span = tracer.get_current_span()
+                span.set_attribute("event.id", raw["id"])
+                raw.setdefault("meta", {})["received_at"] = start_time
 
                 # Предобработка
                 pre_start = asyncio.get_event_loop().time()
@@ -76,17 +84,20 @@ class MusicAdapter:
                 )
 
                 await msg.ack()
-                logger.info(f"Event {raw['id']} processed in {pre_lat + gen_lat:.2f}s")
+                total = asyncio.get_event_loop().time() - start_time
+                logger.info(f"Event {raw['id']} processed in {total:.2f}s")
+                MSG_COUNT.labels(status="ok").inc()
+                MSG_LATENCY.observe(total)
 
             except Exception as e:
                 logger.error("Failed to process message", exc_info=True)
                 to_dead_letter(msg, str(e))
                 await msg.reject(requeue=False)
+                MSG_COUNT.labels(status="error").inc()
 
     async def shutdown(self):
         logger.info("Shutting down MusicAdapter")
         await self.broker.close()
-        # Дать время фоновым задачам завершиться
         await asyncio.sleep(0.1)
         logger.info("Shutdown complete")
 
