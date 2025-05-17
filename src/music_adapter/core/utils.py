@@ -1,27 +1,36 @@
+# src/music_adapter/core/utils.py
 import asyncio
 import random
+import logging
 from typing import Callable, Any, Coroutine
 import prometheus_client
 
-# --- Retry с экспоненциальным бэкоффом ---
 async def retry_with_backoff(
     fn: Callable[[], Coroutine[Any, Any, Any]],
     retries: int = 3,
     base_delay: float = 0.5,
     max_delay: float = 5.0
 ) -> Any:
+    """
+    Retry with exponential backoff and jitter, logging each attempt.
+    """
+    log = logging.getLogger(__name__)
     attempt = 0
     while True:
         try:
             return await fn()
-        except Exception:
+        except Exception as e:
             if attempt >= retries:
+                log.error(f"All {retries} retries failed: {e}")
                 raise
-            delay = min(max_delay, base_delay * 2 ** attempt) * (0.8 + random.random() * 0.4)
+            raw = base_delay * (2 ** attempt)
+            jitter = raw * 0.2
+            delay = min(max_delay, raw + random.uniform(-jitter, jitter))
+            log.warning(f"Retry {attempt + 1}/{retries} in {delay:.2f}s after error: {e}")
             await asyncio.sleep(delay)
             attempt += 1
 
-# --- Prometheus-метрики ---
+# Prometheus-метрики
 REQUEST_LATENCY = prometheus_client.Histogram(
     "adapter_request_latency_seconds",
     "Latency of external requests",
@@ -37,8 +46,8 @@ def record_request(service: str, status: str, latency: float):
     REQUEST_COUNT.labels(service=service, status=status).inc()
     REQUEST_LATENCY.labels(service=service).observe(latency)
 
-# --- Dead-letter helper ---
 def to_dead_letter(msg, reason: str):
-    # Логируем и отвергаем без повторного закидывания
+    """
+    Log and reject message without requeue.
+    """
     print(f"DLQ: message {getattr(msg, 'delivery_tag', '<unknown>')}, reason: {reason}")
-    # msg.reject(requeue=False) нужно вызывать отдельно в обработчике
